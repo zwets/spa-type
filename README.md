@@ -61,7 +61,8 @@ work:
 * The BLAST+ suite (any version), including the `blastn`, `makeblastdb`,
   and `blastdbcmd` commands.
 * GNU awk (`gawk`).  A version of awk is most likely installed on your system,
-  but note that recent Debian/Ubuntu release by default install `mawk`.
+  but note that recent Debian/Ubuntu releases by default install `mawk`, so
+  you may need to `apt install gawk`.
 * For `update-db.sh` you need `python3` and `wget`.
 
 #### Updating the database
