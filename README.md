@@ -1,6 +1,6 @@
 # spa-type
 
-Perform spa typing on _S aureus_ assemblies or reads.
+Perform spa typing on _S aureus_ assemblies.
 
 Home: <https://github.com/zwets/spa-type>
 
@@ -14,7 +14,7 @@ work:
     t303
 
     $ bin/spa-type --help
-    ... command description shows ...
+    ... command description ...
 
 
 ## Background
@@ -75,7 +75,7 @@ work:
 
 #### Licence
 
-spa-type - perform spa typing on S aureus assemblies or reads  
+spa-type - perform spa typing on S aureus assemblies
 Copyright (C) 2021  Marco van Zwetselaar <io@zwets.it>  
 
 This program is free software: you can redistribute it and/or modify
