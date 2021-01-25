@@ -1,0 +1,112 @@
+#!/bin/sh
+#
+#  spa-type-fasta - perform spa typing on S aureus assembly
+#  Copyright (C) 2021  Marco van Zwetselaar <io@zwets.it>
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  This file is part of http://github.com/zwets/spa-type
+
+# Our directories
+BIN_DIR="$(realpath -e "$(dirname "$0")")"
+BASE_DIR="$(realpath -e "$BIN_DIR/..")"
+WORK_DIR="$(mktemp -d)"
+
+# Cleanup and exit at first error to occur
+set -e
+trap cleanup EXIT
+RETVAL=1
+
+# Function exits this script with $* on stderr
+err_exit() { echo "$(basename "$0"): $*" >&2; exit 1; }
+
+# Function presents warning $* on standard error
+warn() { echo "$(basename "$0"): warning: $*" >&2; }
+
+# Function presents verbose output $* if VERBOSE is set
+emit() { [ -z "$VERBOSE" ] || echo "$(basename "$0"): $*" >&2; }
+
+# Function cleans up WORK_DIR unless KEEP is set
+cleanup() {
+    [ -z "$KEEP" ] && [ -d "$WORK_DIR" ] && rm -rf "$WORK_DIR" && 
+        emit "cleaning up temporary files: $WORK_DIR" ||
+        warn "keeping intermediate files in $WORK_DIR"
+}
+
+# Show usage information and exit
+usage_exit() {
+    echo "
+Usage: $(basename $0) [OPTIONS] FILE
+  
+  Determine spa type for the contigs in FASTA format FILE.
+ 
+  Options
+   -k, --keep     Keep intermediary files
+   -v, --verbose  Show progress on stderr
+" >&2
+    exit ${1:-1}
+}
+
+# Parse options
+
+unset KEEP VERBOSE
+
+while [ $# -ne 0 -a "$(expr "$1" : '\(.\)..*')" = "-" ]; do
+    case $1 in
+    -k|--keep) KEEP=1 ;;
+    -v|--verbose) VERBOSE=1 ;;
+    -h|--help) usage_exit 0 ;;
+    *) usage_exit ;;
+    esac
+    shift
+done
+
+[ $# -eq 1 ] || usage_exit
+[ -f "$1" ] || err_exit "no such file: $1"
+FASTA_IN="$1"
+
+# Process FASTA_IN
+
+emit "processing: $FASTA_IN"
+
+emit "perform in silico PCR"
+"$BIN_DIR/blast-in-silico-pcr" -u -b 100 -t 1000 "$BASE_DIR/reference/primers.fna" "$FASTA_IN" \
+    >"$WORK_DIR/pcr-products.fna"
+
+# Error out if PCR selected nothing, warn if it selected more than one sequence
+N_PRODS="$(grep '^>' "$WORK_DIR/pcr-products.fna" | wc -l)"
+[ $N_PRODS -ge 1 ] || err_exit "in silico PCR produced no products"
+[ $N_PRODS -eq 1 ] || warn "more than one PCR product was produced"
+
+emit "extract repeat region"
+sed -n '2~2p' "$WORK_DIR/pcr-products.fna" | while read PRODUCT; do
+    # The lhs signature is 10 nt immediately before the region, hence cut 10 at start
+    # The rhs signature is 10 nt separated by 18 or 19 nt from region, so we cut 28 and later one more
+    REGION="$(echo "$PRODUCT" | grep -Eo '[AG]CA[AC]CAAAA.+..................TA[CT]ATGTCGT' | tail -c +10 | tr -d '\n' | head -c -28)"
+    [ -z "$REGION" ] || echo "$REGION"
+done >"$WORK_DIR/repeat-regions.dna"
+
+# Error out if no signatures were found, warn if multiple were found
+N_REGS="$(cat "$WORK_DIR/repeat-regions.dna" | wc -l)"
+[ $N_REGS -ge 1 ] || err_exit "demarcating signatures could not be found"
+[ $N_REGS -eq 1 ] || warn "more than one repeat region was found"
+
+emit "type the repeat region"
+cat "$WORK_DIR/repeat-regions.dna" | while read REGION; do
+    # We first search with the full region, then with one nt less (to account for 18 vs 19 separation)
+    FOUND="$(grep -Fw "$REGION" "$BASE_DIR/database/spa_db.csv" || grep -Fw "${REGION%*?}" "$BASE_DIR/database/spa_db.csv")" || true
+    [ -n "$FOUND" ] && echo "$FOUND" | cut -d: -f1 || echo "NT: $REGION"
+done
+
+# vim: sts=4:sw=4:et:si:ai

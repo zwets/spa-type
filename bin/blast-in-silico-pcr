@@ -1,0 +1,221 @@
+#!/bin/sh
+#
+#  blast-in-silico-pcr - Simple in silico PCR using Bash and BLAST
+#  Copyright (C) 2016  Marco van Zwetselaar <io@zwets.it>
+#
+#  This program is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#  Part of http://io.zwets.it/blast-galley
+
+export LC_ALL="C"
+
+# Defaults
+MIN_LEN=1
+MAX_LEN=5000
+MAX_MIS=2
+
+# Function to emit information to standard error if VERBOSE is set
+emit() { [ -z "$VERBOSE" ] || echo "$(basename "$0"): $*" >&2; }
+
+# Function to exit this script with an error message on stderr
+err_exit() { echo "$(basename "$0"): $*" >&2; exit 1; }
+
+# Function to clean up files if keep is set
+clean_up() {
+    [ -z "$KEEP" ] &&
+        emit "cleaning up, removing: $@" && rm -f "$@" ||
+        emit "keeping intermediate file(s): $@"
+}
+
+# Function to show usage information and exit
+usage_exit() {
+    echo "
+Usage: $(basename $0) [OPTIONS] PRIMERS [TARGET]
+
+  Perform in silico PCR for primer pair PRIMERS against FASTA file or BLAST
+  database TARGET.
+
+  PRIMERS must be a FASTA format file with the forward and reverse primer
+  sequences in 5'-3' direction.
+
+  TARGET can be either a FASTA file or the name of a BLAST database.  When
+  TARGET is omitted or '-', FASTA is read from standard input.  Note that
+  sequence IDs in FASTA must be unique; use -u/--uniquify-ids to ensure.
+
+  OPTIONS
+   -m,--mismatches M  mismatch count allowed per primer (default: $MAX_MIS)
+   -b,--min-len B     minimum required selection length (default: $MIN_LEN)
+   -t,--max-len T     maximum allowed selection length (default: $MAX_LEN)
+   -u,--uniquify-ids  generate unique sequence IDs for target FASTA
+   -k,--keep          keep and reuse intermediate files
+   -v,--verbose       emit progress messages to standard error
+"
+    exit ${1:-1}
+}
+
+# Parse options
+
+unset VERBOSE KEEP UNIQUIFY
+while [ $# -ne 0 -a "$(expr "$1" : '\(.[0-9]*\).*')" = "-" ]; do
+    case $1 in
+    -m|--mismatches) shift || usage_exit; MAX_MIS=$1 ;;
+    --mismatches=*)  MAX_MIS="${1#--mismatches=}" ;;
+    -b|--min-len)    shift || usage_exit; MIN_LEN=$1 ;;
+    --min-len=*)     MIN_LEN="${1#--min-len=}" ;;
+    -t|--max-len)    shift || usage_exit; MAX_LEN=$1 ;;
+    --max-len=*)     MAX_LEN="${1#--max-len=}" ;;
+    -u|--uniquify*)  UNIQUIFY=1 ;;
+    -k|--keep)       KEEP=1 ;;
+    -v|--verbose)    VERBOSE=1 ;;
+    -h|--help)       usage_exit 0 ;;
+    *) usage_exit ;;
+    esac
+    shift
+done
+
+# Check the arguments
+
+[ $# -ge 1 ] || usage_exit
+[ $MIN_LEN -gt 0 ] || err_exit "minimum length must be non-zero positive"
+[ $MAX_LEN -ge $MIN_LEN ] || err_exit "maximum length must not be smaller than minimum length"
+
+PRIMERS_FILE="$1"
+[ -r "$PRIMERS_FILE" ] || err_exit "cannot read primer file: $PRIMERS_FILE"
+[ $(grep -v '^>' "$PRIMERS_FILE" | grep -v '^$' | wc -l) -eq 2 ] || err_exit "file must have two primers: $PRIMERS_FILE"
+
+TARGET="${2:-"-"}"
+if [ "$TARGET" = '-' ] || [ -f "$TARGET" ]; then
+
+    # TARGET is stdin or a file, we read FASTA
+    TMP_BLASTDB_DIR="blast.tmpdir"
+    mkdir -p "$TMP_BLASTDB_DIR"
+    BLAST_DB="$TMP_BLASTDB_DIR/target"
+
+    emit "create temporary BLAST database: $BLAST_DB"
+    if [ -n "$UNIQUIFY" ]; then
+        gawk -bO '/^>/ { print ">U" NR "_" substr($0,2) } /^[^>]/' "$TARGET"
+    else
+        cat "$TARGET"
+    fi |
+    makeblastdb -out "$BLAST_DB" -title "target" -dbtype nucl -parse_seqids >/dev/null ||
+        err_exit "failed to create BLAST database: $BLAST_DB"
+
+    blastdbcmd -db "$BLAST_DB" -info >/dev/null || err_exit "failed to create temporary BLAST database: $TARGET"
+
+else # TARGET is not a file or '-', we assume it is the name of a BLAST database
+
+    BLAST_DB="$TARGET"
+    emit "check that TARGET is a BLAST database: $TARGET"
+    blastdbcmd -db "$BLAST_DB" -info >/dev/null || err_exit "target is neither a file nor a BLAST database: $TARGET"
+fi
+
+# Set up variables for the intermediary files
+
+FWD_PRIMER="primer.fwd.fna"
+REV_PRIMER="primer.rev.fna"
+FWD_BLAST="blast.fwd.tsv"
+FWD_SEQIDS="blast.fwd.seqids"
+REV_BLAST="blast.rev.tsv"
+TSV_OUTPUT="pcr.matches.tsv"
+FASTA_OUT="pcr.products.fna"
+BLAST_OUTFMT="7 sacc sstrand sstart send qlen length nident mismatch staxids sscinames slen stitle"
+
+# Do the work
+
+emit "extract the forward primer: $FWD_PRIMER"
+[ -n "$KEEP" -a -r "$FWD_PRIMER" ] || grep -v '^>' "$PRIMERS_FILE" | grep -v '^$' | head -n 1 > "$FWD_PRIMER"
+
+emit "extract the reverse primer: $REV_PRIMER"
+[ -n "$KEEP" -a -r "$REV_PRIMER" ] || grep -v '^>' "$PRIMERS_FILE" | grep -v '^$' | tail -n 1 > "$REV_PRIMER"
+
+emit "BLAST the forward primer: $FWD_BLAST"
+[ -n "$KEEP" -a -r "$FWD_BLAST" ] || if ! blastn -task blastn-short -db "$BLAST_DB" -query "$FWD_PRIMER" -ungapped -outfmt "$BLAST_OUTFMT" | grep -v '^#' > "$FWD_BLAST"; then
+    clean_up "$FWD_PRIMER" "$REV_PRIMER" "$FWD_BLAST"
+    err_exit "BLAST of forward primer against database $BLAST_DB failed"
+fi
+
+clean_up "$FWD_PRIMER"
+
+emit "extract the forward finds: $FWD_SEQIDS"
+[ -n "$KEEP" -a -r "$FWD_SEQIDS" ] || {
+    gawk -bOF '\t' '{print $1}' "$FWD_BLAST" | sort -u > "$FWD_SEQIDS.tmp" &&
+    blastdb_aliastool -seqid_file_in "$FWD_SEQIDS.tmp" -seqid_file_out "$FWD_SEQIDS" &&
+    rm -f "$FWD_SEQIDS.tmp" || mv -f "$FWD_SEQIDS.tmp" "$FWD_SEQIDS"
+}
+
+emit "BLAST the reverse primers: $REV_BLAST"
+[ -n "$KEEP" -a -r "$REV_BLAST" ] || if ! blastn -task blastn-short -db "$BLAST_DB" -query "$REV_PRIMER" -seqidlist "$FWD_SEQIDS" -ungapped -outfmt "$BLAST_OUTFMT" | grep -v '^#' > "$REV_BLAST"; then
+    clean_up "$FWD_PRIMER" "$REV_PRIMER" "$FWD_SEQIDS" "$FWD_BLAST" "$REV_BLAST"
+    err_exit "BLAST of reverse primer against database $BLAST_DB failed"
+fi
+
+clean_up "$FWD_SEQIDS" "$REV_PRIMER"
+
+emit "join the forward and reverse finds: $TSV_OUTPUT"
+gawk -bOF '\t' -v FWD_BLAST_CSV="$FWD_BLAST" -v MIN_LEN=$MIN_LEN -v MAX_LEN=$MAX_LEN -v MAX_MIS=$MAX_MIS '
+BEGIN {
+    OFS=FS                              # Tab-separated output
+    while (getline <FWD_BLAST_CSV == 1) {
+        if ($7 + MAX_MIS >= $5) {	# Filter on mismatch limit ($7 is identical count, $5 is query length)
+            fwd[$1][1] = ""		# Tell awk this is a subarray, see awk(1)
+            split($0,fwd[$1])
+        }
+    }
+    close(FWD_BLAST_CSV)
+    print "#seq_id", "length", "strand", "start", "end", "mm_fwd", "mm_rev", "tax_id", "sci_name", "seq_len", "seq_title"
+}
+# For every reverse line with at most MAX_MIS mismatches
+$7 + MAX_MIS >= $5 {
+    if (fwd[$1][1] == $1 && $2 != fwd[$1][2]) { 	# check that primers found on opposite strands
+        # Length always difference of starting positions; start is lowest on plus, highest on minus (else do not meet)
+        spos = $2 == "minus" ? fwd[$1][3] : $3		# start position is the start on the plus strand
+        epos = $2 == "minus" ? $3 : fwd[$1][3]		# end position is the start on the minus strand
+        len = 1 + epos - spos
+        # Select if length not negative (PCR will not meet), and within length limit
+        if (len >= MIN_LEN && len <= MAX_LEN) {
+            print $1, len, fwd[$1][2], spos, epos, fwd[$1][5] - fwd[$1][7], $5 - $7, $9, $10, $11, $12
+        }
+    }
+}
+' "$REV_BLAST" >"$TSV_OUTPUT"
+
+clean_up "$FWD_BLAST" "$REV_BLAST"
+
+emit "retrieve the product sequences"
+tail -n +2 "$TSV_OUTPUT" | while read CONTIG LEN STRAND FROM TO REST; do
+    NPROD=$((N_PROD+1))
+    blastdbcmd -db "$BLAST_DB" -entry "$CONTIG" -range "$FROM-$TO" |
+    gawk -bO -v NPROD="$NPROD" -v STRAND="$STRAND" -v INFO="[contig=$CONTIG; pos=$FROM-$TO; len=$LEN; strand=$STRAND]" '
+        NR==1 { print ">pcr_prod_" NPROD " " INFO " " substr($0,2) }
+        NR!=1 { SEQ = SEQ $0 }
+        END {
+          if (STRAND == "plus") print SEQ; else {
+            for (i = length(SEQ); i > 0; --i) {
+              c = substr (SEQ,i,1)
+              p = index ("AaCcGgTtNnKkMmSsWwYyRrBbVvDdHh", c)
+              if (!p) { print "blast-in-silico-pcr: invalid character in sequence: " c; exit 1; }
+              c = substr("TtGgCcAaNnMmKkWwSsRrYyVvBbHhDd", p, 1)
+              printf "%c", c
+            }
+            printf "\n"
+          }
+        }'
+done | tee "$FASTA_OUT"
+
+clean_up "$TSV_OUTPUT" "$FASTA_OUT"
+[ -n "$KEEP" ] || [ ! -d "$TMP_BLASTDB_DIR" ] || rm -rf "$TMP_BLASTDB_DIR"
+
+exit 0
+
+# vim: sts=4:sw=4:ai:si:et:
