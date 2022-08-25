@@ -205,7 +205,7 @@ tail -n +2 "$TSV_OUTPUT" | while read CONTIG LEN STRAND FROM TO REST; do
               c = substr (SEQ,i,1)
               p = index ("AaCcGgTtNnKkMmSsWwYyRrBbVvDdHh", c)
               if (!p) { print "blast-in-silico-pcr: invalid character in sequence: " c; exit 1; }
-              c = substr("TtGgCcAaNnMmKkWwSsRrYyVvBbHhDd", p, 1)
+              c = substr("TtGgCcAaNnMmKkSsWwRrYyVvBbHhDd", p, 1)
               printf "%c", c
             }
             printf "\n"
