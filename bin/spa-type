@@ -19,7 +19,7 @@
 #  This file is part of http://github.com/zwets/spa-type
 
 # Our directories
-BIN_DIR="$(realpath -e "$(dirname "$0")")"
+BIN_DIR="$(dirname "$(realpath -e "$0")")"
 BASE_DIR="$(realpath -e "$BIN_DIR/..")"
 WORK_DIR="$(mktemp -d)"
 
